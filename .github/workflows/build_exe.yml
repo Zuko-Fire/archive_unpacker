@@ -25,7 +25,7 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name "SmartUnpacker" --add-binary "UnRAR.exe;." archive_unpacker.py
+        pyinstaller --onefile --windowed --name "SmartUnpacker" --add-binary "UnRAR.exe;." --icon="icon.ico" archive_unpacker.py
 
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
