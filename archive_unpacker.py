@@ -10,26 +10,64 @@ from tkinter import ttk, filedialog, messagebox
 import rarfile
 import py7zr
 
-# Настройка rarfile для поиска unrar
+# Импорт winreg только для Windows
+if sys.platform == 'win32':
+    import winreg
+
+# Настройка rarfile для поиска unrar рядом с exe
 if getattr(sys, 'frozen', False):
-    # Если запущено как exe
-    base_path = sys._MEIPASS
-    unrar_path = os.path.join(os.path.dirname(sys.executable), 'UnRAR.exe')
+    exe_dir = os.path.dirname(sys.executable)
+    unrar_filename = 'UnRAR.exe' if sys.platform == 'win32' else 'unrar'
+    unrar_path = os.path.join(exe_dir, unrar_filename)
     if os.path.exists(unrar_path):
         rarfile.UNRAR_TOOL = unrar_path
+        if sys.platform != 'win32':
+            os.environ['UNRAR_LIB_PATH'] = unrar_path
 
 
 class ArchiveUnpackerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Умная распаковщик архивов (Split & Normal)")
-        self.root.geometry("700x500")
+        self.root.title("Умный распаковщик архивов")
+        self.root.geometry("750x550")
         self.root.resizable(True, True)
+
+        # Для хранения ссылки на иконку (защита от сборщика мусора Tkinter)
+        self._icon_ref = None
 
         self.log_queue = queue.Queue()
         self.is_running = False
 
+        self._build_menu()
         self._build_ui()
+        self._handle_command_line_args()
+
+    def _handle_command_line_args(self):
+        """Обработка аргументов командной строки (для запуска из контекстного меню)"""
+        if len(sys.argv) > 1:
+            # Берём последний аргумент (в Windows это путь к файлу)
+            arg_path = sys.argv[-1].strip('"')
+            if os.path.exists(arg_path):
+                self.var_source.set(arg_path)
+                self._log(f"Получен файл из контекстного меню: {arg_path}")
+
+    def _build_menu(self):
+        """Создание верхнего меню"""
+        menu_bar = tk.Menu(self.root)
+
+        settings_menu = tk.Menu(menu_bar, tearoff=0)
+        settings_menu.add_command(label="Сменить иконку окна...", command=self._change_window_icon)
+
+        # Пункты для контекстного меню только для Windows
+        if sys.platform == 'win32':
+            settings_menu.add_separator()
+            settings_menu.add_command(label="➕ Добавить в контекстное меню Windows",
+                                      command=self._add_to_context_menu)
+            settings_menu.add_command(label="➖ Удалить из контекстного меню Windows",
+                                      command=self._remove_from_context_menu)
+
+        menu_bar.add_cascade(label="Настройки", menu=settings_menu)
+        self.root.config(menu=menu_bar)
 
     def _build_ui(self):
         # Поля ввода
@@ -40,9 +78,14 @@ class ArchiveUnpackerApp:
         ttk.Entry(frame_in, textvariable=self.var_source, width=60).pack(side="left", padx=5, pady=5)
         ttk.Button(frame_in, text="Файл/Папка", command=self._select_source).pack(side="left", padx=5)
 
+        # Папка назначения (теперь опциональна)
         self.var_dest = tk.StringVar()
-        ttk.Entry(frame_in, textvariable=self.var_dest, width=60).pack(side="left", padx=5, pady=5)
-        ttk.Button(frame_in, text="Куда распаковать", command=self._select_dest).pack(side="left", padx=5)
+        dest_entry = ttk.Entry(frame_in, textvariable=self.var_dest, width=60)
+        dest_entry.pack(side="left", padx=5, pady=5)
+        ttk.Button(frame_in, text="Куда распаковать (опц.)", command=self._select_dest).pack(side="left", padx=5)
+
+        ttk.Label(frame_in, text="(Если пусто — распакуется в папку архива)",
+                  foreground="gray").pack(side="left", padx=5)
 
         # Кнопка старта
         self.btn_start = ttk.Button(self.root, text="НАЧАТЬ РАСПАКОВКУ", command=self._start_process)
@@ -63,7 +106,7 @@ class ArchiveUnpackerApp:
         self.text_log.pack(side="left", fill="both", expand=True)
 
     def _select_source(self):
-        path = filedialog.askopenfilename(title="Выберите любой файл архива (или папку)")
+        path = filedialog.askopenfilename(title="Выберите любой файл архива")
         if not path:
             path = filedialog.askdirectory(title="Или выберите папку с архивами")
         if path:
@@ -73,6 +116,71 @@ class ArchiveUnpackerApp:
         path = filedialog.askdirectory(title="Выберите папку для распаковки")
         if path:
             self.var_dest.set(path)
+
+    def _change_window_icon(self):
+        """Смена иконки запущенного окна"""
+        path = filedialog.askopenfilename(
+            title="Выберите иконку",
+            filetypes=[("Иконки и картинки", "*.ico *.png *.gif")]
+        )
+        if path:
+            try:
+                if sys.platform == 'win32' and path.lower().endswith('.ico'):
+                    self.root.iconbitmap(path)
+                else:
+                    img = tk.PhotoImage(file=path)
+                    self.root.iconphoto(True, img)
+                    self._icon_ref = img  # Сохраняем ссылку
+                self._log("Иконка окна успешно изменена.")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось загрузить иконку:\n{e}")
+
+    def _add_to_context_menu(self):
+        """Добавление в контекстное меню Windows (правая кнопка мыши)"""
+        if sys.platform != 'win32':
+            return
+
+        try:
+            if getattr(sys, 'frozen', False):
+                exe_path = sys.executable
+                cmd_template = f'"{exe_path}" "%1"'
+            else:
+                script_path = os.path.abspath(__file__)
+                python_exe = sys.executable
+                cmd_template = f'"{python_exe}" "{script_path}" "%1"'
+
+            key_name = r"Software\Classes\*\shell\SmartUnpacker"
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_name)
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Распаковать здесь (Smart Unpacker)")
+
+            if getattr(sys, 'frozen', False):
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, exe_path)
+
+            command_key = winreg.CreateKey(key, "command")
+            winreg.SetValueEx(command_key, "", 0, winreg.REG_SZ, cmd_template)
+
+            winreg.CloseKey(command_key)
+            winreg.CloseKey(key)
+            messagebox.showinfo("Успех",
+                                "Утилита добавлена в контекстное меню!\n"
+                                "Теперь при клике правой кнопкой мыши по любому файлу "
+                                "будет доступен пункт 'Распаковать здесь'.")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось добавить в реестр:\n{e}")
+
+    def _remove_from_context_menu(self):
+        """Удаление из контекстного меню Windows"""
+        if sys.platform != 'win32':
+            return
+        try:
+            key_name = r"Software\Classes\*\shell\SmartUnpacker"
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_name + r"\command")
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_name)
+            messagebox.showinfo("Успех", "Утилита удалена из контекстного меню.")
+        except FileNotFoundError:
+            messagebox.showinfo("Инфо", "Утилита и так не была в контекстном меню.")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось удалить из реестра:\n{e}")
 
     def _log(self, msg):
         self.log_queue.put(msg)
@@ -91,11 +199,11 @@ class ArchiveUnpackerApp:
         if self.is_running:
             return
 
-        source = self.var_source.get()
-        dest = self.var_dest.get()
+        source = self.var_source.get().strip()
+        dest = self.var_dest.get().strip()
 
-        if not source or not dest:
-            messagebox.showerror("Ошибка", "Укажите источник и папку назначения!")
+        if not source:
+            messagebox.showerror("Ошибка", "Укажите исходный файл или папку!")
             return
 
         self.is_running = True
@@ -103,12 +211,19 @@ class ArchiveUnpackerApp:
         self.progress.start()
         self.root.after(100, self._process_logs)
 
-        # Запуск многопоточности
         thread = threading.Thread(target=self._worker, args=(source, dest), daemon=True)
         thread.start()
 
     def _worker(self, source, dest):
         try:
+            # ЛОГИКА: Если папка не указана, берём папку источника
+            if not dest:
+                if os.path.isfile(source):
+                    dest = os.path.dirname(source)
+                else:
+                    dest = source
+                self._log(f"Папка назначения не указана. Распаковка в папку источника: {dest}")
+
             files_to_process = []
             if os.path.isfile(source):
                 files_to_process.append(source)
@@ -116,7 +231,6 @@ class ArchiveUnpackerApp:
                 for f in os.listdir(source):
                     files_to_process.append(os.path.join(source, f))
 
-            # Фильтруем и группируем файлы
             archives = self._find_and_group_archives(files_to_process)
 
             if not archives:
@@ -139,46 +253,49 @@ class ArchiveUnpackerApp:
         try:
             with open(filepath, 'rb') as f:
                 header = f.read(8)
-            if header.startswith(b'Rar!\x1a\x07'): return 'rar'
-            if header.startswith(b'PK\x03\x04') or header.startswith(b'PK\x05\x06') or header.startswith(
-                b'PK\x07\x08'): return 'zip'
-            if header.startswith(b'7z\xbc\xaf\x27\x1c'): return '7z'
+            if header.startswith(b'Rar!\x1a\x07'):
+                return 'rar'
+            if header.startswith(b'PK\x03\x04') or header.startswith(b'PK\x05\x06') or header.startswith(b'PK\x07\x08'):
+                return 'zip'
+            if header.startswith(b'7z\xbc\xaf\x27\x1c'):
+                return '7z'
         except Exception:
             pass
         return None
 
     def _find_and_group_archives(self, files):
-        """Группирует файлы, определяя первые части разбитых архивов по заголовку и имени"""
+        """Группирует файлы, определяя первые части разбитых архивов"""
         archives = []
         processed_bases = set()
 
         for f in files:
-            if not os.path.isfile(f): continue
+            if not os.path.isfile(f):
+                continue
 
             arc_type = self._read_header(f)
-            if not arc_type: continue
+            if not arc_type:
+                continue
 
-            # Пытаемся определить базовое имя для split-архивов
             base_name = self._get_base_name(f)
 
             if base_name in processed_bases:
                 continue
             processed_bases.add(base_name)
 
-            # Ищем все части в этой директории
             dir_path = os.path.dirname(f)
             parts = []
             for item in os.listdir(dir_path):
                 item_path = os.path.join(dir_path, item)
                 if os.path.isfile(item_path) and self._get_base_name(item_path) == base_name:
-                    if self._read_header(item_path) == arc_type or arc_type == 'zip':
-                        # Для ZIP части могут не иметь заголовка PK, кроме первой
+                    # Для ZIP части (кроме первой) могут не иметь заголовка PK
+                    item_type = self._read_header(item_path)
+                    if item_type == arc_type or arc_type == 'zip':
                         parts.append(item_path)
 
-            # Сортируем части естественно (part1, part2... или 001, 002...)
-            parts.sort(key=lambda x: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', x)])
+            # Сортируем части естественно
+            parts.sort(key=lambda x: [int(c) if c.isdigit() else c.lower()
+                                      for c in re.split(r'(\d+)', x)])
 
-            # Первая часть - это та, с которой начинаем
             first_part = parts[0] if parts else f
             archives.append({'type': arc_type, 'parts': parts, 'first_part': first_part})
 
@@ -187,9 +304,7 @@ class ArchiveUnpackerApp:
     def _get_base_name(self, filepath):
         """Убирает номера частей из имени файла для группировки"""
         filename = os.path.basename(filepath)
-        # Убираем .part1, .001, .r00 и т.д.
         base = re.sub(r'\.(part\d+|\d{3}|r\d{2}|z\d{2})$', '', filename, flags=re.IGNORECASE)
-        # Убираем само расширение
         base = os.path.splitext(base)[0]
         return base
 
@@ -200,7 +315,7 @@ class ArchiveUnpackerApp:
 
         self._log(f"Обработка: {os.path.basename(first_part)} (Тип: {arc_type}, Частей: {len(parts)})")
 
-        # Создаем временную папку НА ТОМ ЖЕ ДИСКЕ, куда распаковываем (экономим C:\Temp)
+        # Создаём временную папку НА ТОМ ЖЕ ДИСКЕ, куда распаковываем
         temp_dir = os.path.join(dest_dir, f".temp_unpack_{os.getpid()}")
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -211,7 +326,7 @@ class ArchiveUnpackerApp:
                 self._extract_7z(first_part, dest_dir)
             elif arc_type == 'zip':
                 if len(parts) > 1:
-                    self._log("  -> Сборка разбитого ZIP в временный файл на диске назначения...")
+                    self._log("  -> Сборка разбитого ZIP во временный файл на диске назначения...")
                     combined_path = os.path.join(temp_dir, "combined_temp.zip")
                     self._combine_files(parts, combined_path)
                     self._extract_zip(combined_path, dest_dir)
@@ -220,7 +335,6 @@ class ArchiveUnpackerApp:
         except Exception as e:
             self._log(f"  -> ОШИБКА распаковки: {str(e)}")
         finally:
-            # Очищаем временную папку
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
