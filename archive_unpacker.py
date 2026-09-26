@@ -47,14 +47,39 @@ def save_settings(settings):
 
 # --- Настройка UnRAR ---
 def _setup_unrar():
+    """Ищет unrar и настраивает rarfile с абсолютным путём"""
     possible_names = ['UnRAR.exe', 'unrar.exe', 'unrar']
 
-    for name in possible_names:
-        path = os.path.join(BASE_DIR, name)
-        if os.path.exists(path):
-            rarfile.UNRAR_TOOL = os.path.abspath(path)
-            return
+    # 1. Проверяем временную папку PyInstaller (если программа собрана в один файл)
+    if getattr(sys, 'frozen', False):
+        # PyInstaller распаковывает файлы из --add-binary в sys._MEIPASS
+        if hasattr(sys, '_MEIPASS'):
+            for name in possible_names:
+                path = os.path.join(sys._MEIPASS, name)
+                if os.path.exists(path):
+                    rarfile.UNRAR_TOOL = os.path.abspath(path)
+                    print(f"[INFO] UnRAR найден внутри exe: {rarfile.UNRAR_TOOL}")
+                    return
 
+        # 2. Проверяем папку, где лежит сам exe (если не собран в один файл)
+        base_dir = os.path.dirname(sys.executable)
+        for name in possible_names:
+            path = os.path.join(base_dir, name)
+            if os.path.exists(path):
+                rarfile.UNRAR_TOOL = os.path.abspath(path)
+                print(f"[INFO] UnRAR найден в папке exe: {rarfile.UNRAR_TOOL}")
+                return
+    else:
+        # 3. Если запущено как Python-скрипт
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        for name in possible_names:
+            path = os.path.join(base_dir, name)
+            if os.path.exists(path):
+                rarfile.UNRAR_TOOL = os.path.abspath(path)
+                print(f"[INFO] UnRAR найден в папке скрипта: {rarfile.UNRAR_TOOL}")
+                return
+
+    # 4. Проверяем стандартные папки установки WinRAR (только Windows)
     if sys.platform == 'win32':
         winrar_paths = [
             r"C:\Program Files\WinRAR\UnRAR.exe",
@@ -65,13 +90,19 @@ def _setup_unrar():
         for path in winrar_paths:
             if path and os.path.exists(path):
                 rarfile.UNRAR_TOOL = path
+                print(f"[INFO] UnRAR найден в папке WinRAR: {rarfile.UNRAR_TOOL}")
                 return
 
+    # 5. Ищем в системном PATH
     for name in ['unrar', 'UnRAR']:
         found = shutil.which(name)
         if found:
             rarfile.UNRAR_TOOL = found
+            print(f"[INFO] UnRAR найден в PATH: {rarfile.UNRAR_TOOL}")
             return
+
+    print(f"[КРИТИЧЕСКАЯ ОШИБКА] UnRAR не найден!")
+    print("Установите WinRAR или положите UnRAR.exe рядом со скриптом.")
 
 
 _setup_unrar()
