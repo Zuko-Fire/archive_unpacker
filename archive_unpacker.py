@@ -5,6 +5,7 @@ import shutil
 import zipfile
 import threading
 import queue
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import rarfile
@@ -14,15 +15,50 @@ import py7zr
 if sys.platform == 'win32':
     import winreg
 
-# Настройка rarfile для поиска unrar рядом с exe
-if getattr(sys, 'frozen', False):
-    exe_dir = os.path.dirname(sys.executable)
-    unrar_filename = 'UnRAR.exe' if sys.platform == 'win32' else 'unrar'
-    unrar_path = os.path.join(exe_dir, unrar_filename)
-    if os.path.exists(unrar_path):
+
+def _setup_unrar():
+    """Ищет unrar и настраивает rarfile с абсолютным путём"""
+    # Определяем папку, где лежит программа
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Пробуем разные варианты имени
+    possible_names = ['UnRAR.exe', 'unrar.exe', 'unrar']
+    unrar_path = None
+
+    for name in possible_names:
+        path = os.path.join(base_dir, name)
+        if os.path.exists(path):
+            unrar_path = path
+            break
+
+    if not unrar_path:
+        # Ищем в системном PATH
+        for name in ['unrar', 'UnRAR']:
+            found = shutil.which(name)
+            if found:
+                unrar_path = found
+                break
+
+    if unrar_path:
+        # Используем абсолютный путь
+        unrar_path = os.path.abspath(unrar_path)
         rarfile.UNRAR_TOOL = unrar_path
+
+        # Для macOS также устанавливаем переменную окружения
         if sys.platform != 'win32':
             os.environ['UNRAR_LIB_PATH'] = unrar_path
+
+        print(f"[INFO] UnRAR настроен: {unrar_path}")
+    else:
+        print(f"[КРИТИЧЕСКАЯ ОШИБКА] UnRAR не найден!")
+        print(f"Положите 'UnRAR.exe' в папку: {base_dir}")
+        print("Скачать можно здесь: https://www.rarlab.com/rar_add.htm")
+
+
+_setup_unrar()
 
 
 class ArchiveUnpackerApp:
@@ -34,6 +70,7 @@ class ArchiveUnpackerApp:
 
         # Для хранения ссылки на иконку (защита от сборщика мусора Tkinter)
         self._icon_ref = None
+        self._current_parts = []
 
         self.log_queue = queue.Queue()
         self.is_running = False
@@ -315,6 +352,9 @@ class ArchiveUnpackerApp:
 
         self._log(f"Обработка: {os.path.basename(first_part)} (Тип: {arc_type}, Частей: {len(parts)})")
 
+        # Сохраняем список частей для использования в _extract_rar
+        self._current_parts = parts
+
         # Создаём временную папку НА ТОМ ЖЕ ДИСКЕ, куда распаковываем
         temp_dir = os.path.join(dest_dir, f".temp_unpack_{os.getpid()}")
         os.makedirs(temp_dir, exist_ok=True)
@@ -346,9 +386,43 @@ class ArchiveUnpackerApp:
                     shutil.copyfileobj(inf, outf, length=1024 * 1024 * 10)  # Буфер 10 МБ
 
     def _extract_rar(self, filepath, dest):
-        with rarfile.RarFile(filepath) as rf:
-            rf.extractall(dest)
-        self._log("  -> RAR успешно распакован.")
+        """Распаковка RAR с явным указанием всех частей для разбитых архивов"""
+        # Получаем абсолютный путь к unrar
+        unrar_tool = rarfile.UNRAR_TOOL
+
+        # Определяем, является ли архив разбитым
+        if len(self._current_parts) > 1:
+            # Для разбитых архивов вызываем unrar напрямую со всеми частями
+            self._log("  -> Обнаружен разбитый RAR. Сборка частей...")
+
+            # Создаём список всех частей
+            parts = self._current_parts
+
+            # Вызываем unrar с явным указанием всех частей
+            cmd = [unrar_tool, 'x', '-y', '-o+']
+            cmd.extend(parts)
+            cmd.append(dest + os.sep)
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,  # 1 час таймаут
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+
+                if result.returncode == 0:
+                    self._log("  -> RAR успешно распакован.")
+                else:
+                    self._log(f"  -> ОШИБКА unrar (код {result.returncode}): {result.stderr}")
+            except Exception as e:
+                self._log(f"  -> ОШИБКА вызова unrar: {str(e)}")
+        else:
+            # Для обычных архивов используем стандартный rarfile
+            with rarfile.RarFile(filepath) as rf:
+                rf.extractall(dest)
+            self._log("  -> RAR успешно распакован.")
 
     def _extract_zip(self, filepath, dest):
         with zipfile.ZipFile(filepath, 'r') as zf:
